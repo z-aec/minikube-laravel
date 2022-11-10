@@ -1,0 +1,169 @@
+kind: Service
+apiVersion: v1
+metadata:
+  name: nginx-service
+  labels:
+    app: nginx
+spec:
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: 80
+  selector:
+    app: nginx
+  type: NodePort
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: php8
+  labels:
+    app: php8
+spec:
+  ports:
+    - name: listener
+      protocol: TCP
+      port: 9000
+      targetPort: 9000
+  selector:
+    app: php8
+  type: NodePort
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 33%
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: php8
+          image: php8:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 9000
+              name: http
+              protocol: TCP
+          resources:
+            requests:
+              memory: 200Mi
+              cpu: "0.12"
+            limits:
+              memory: 300Mi
+              cpu: "0.25"
+          volumeMounts:
+            - name: www-storage
+              mountPath: /var/www/nginx-php-app
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  [
+                    "/bin/sh",
+                    "-c",
+                    "cp -R /app/. /var/www/nginx-php-app; chmod -R 777 /var/www/nginx-php-app; rm -rf /app",
+                  ]
+        - name: nginx
+          image: nginx:alpine
+          resources:
+            requests:
+              memory: 200Mi
+              cpu: "0.12"
+            limits:
+              memory: 300Mi
+              cpu: "0.25"
+          ports:
+            - containerPort: 80
+              name: http
+              protocol: TCP
+          volumeMounts:
+            - name: www-storage
+              mountPath: /var/www/nginx-php-app
+            - name: nginx-config-volume
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+      volumes:
+        - name: www-storage
+          persistentVolumeClaim:
+            claimName: pv-www-claim
+        - name: nginx-config-volume
+          configMap:
+            name: nginx-config
+---
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: nginx-config
+data:
+  nginx.conf: |
+    events {
+    }
+    http {
+      include /etc/nginx/sites-enabled/*.*;
+      include /etc/nginx/mime.types;
+      server {
+        listen 80 default_server;
+        listen [::]:80 default_server;
+        index index.php index.html;
+        error_log  /var/log/nginx/app-error.log;
+        access_log /var/log/nginx/app-access.log;
+        root /var/www/nginx-php-app/public;
+        location ~ \.php$ {
+            try_files $uri =404;
+            fastcgi_split_path_info ^(.+\.php)(/.+)$;
+            fastcgi_pass 127.0.0.1:9000;
+            fastcgi_index index.php;
+            include fastcgi_params;
+            fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+            fastcgi_param PATH_INFO $fastcgi_path_info;
+        }
+        location / {
+            try_files $uri $uri/ /index.php?$query_string;
+            gzip_static on;
+        }
+      }
+    }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pv-www-claim
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 200Mi
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: nginx-ingress
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+spec:
+  rules:
+    - host: test.local
+      http:
+        paths:
+          - path: /
+            pathType: Exact
+            backend:
+              service:
+                name: nginx-service
+                port:
+                  number: 80
